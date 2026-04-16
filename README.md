@@ -1,14 +1,10 @@
-# ToolIR Benchmark Example: Caption Repeat
+# ToolIR Benchmark Example: Podcast Processor
 
 ## Overview
 
-This benchmark demonstrates a common tool-based workflow inefficiency: a client
-calls a captioning service N times on the **same image**, performing identical
-computation repeatedly. The basic version wastes both network bandwidth and server
-compute on every repeat. The optimized version applies **client-side result
-memoization** keyed by `(image_hash, model)`, reducing N server calls to 1 and
-delivering a proportional speedup. This is a clean, self-contained example of the
-**memoization / result caching** optimization class in ToolIR.
+This benchmark demonstrates two common tool-based workflow inefficiencies: **redundant invocations** and **unnecessary network round-trips**. The workflow simulates an AI-driven podcast processing pipeline that transcribes audio, summarizes the text, and translates it.
+
+The basic version wastes network bandwidth and server compute by transcribing the same audio twice, and by downloading intermediate results just to re-upload them. The optimized version applies **client-side result memoization** and **server-side operator fusion**, reducing network calls from 4 to 2 and delivering a ~35% speedup.
 
 ---
 
@@ -16,52 +12,39 @@ delivering a proportional speedup. This is a clean, self-contained example of th
 
 ### Basic Version
 
-```
-Client → POST /caption/interrogate → Server   (call 1: image + model)
-Client → POST /caption/interrogate → Server   (call 2: SAME image!)
-Client → POST /caption/interrogate → Server   (call 3: SAME image!)
-Client → POST /caption/interrogate → Server   (call 4: SAME image!)
-Client → POST /caption/interrogate → Server   (call 5: SAME image!)
+```text
+Client → POST /audio/transcribe → Server      (call 1: audio)
+Client → POST /audio/transcribe → Server      (call 2: SAME audio!)
+Client → POST /text/summarize   → Server      (call 3: upload transcript)
+Client → POST /text/translate   → Server      (call 4: upload transcript again!)
 
-Inefficiency: identical computation repeated N times.
-              Full image transferred over the network on every call.
-              Server runs the model N times for the same input.
+Inefficiencies:
+1. Identical transcription computation repeated 2 times.
+2. The transcript is downloaded to the client only to be immediately uploaded again for translation, failing to use shared server state.
 ```
 
 ### Optimized Version
 
-```
-Client → POST /caption/interrogate → Server   (call 1: compute + cache)
-Client → [CACHE HIT, no RPC]                  (call 2: served locally)
-Client → [CACHE HIT, no RPC]                  (call 3: served locally)
-Client → [CACHE HIT, no RPC]                  (call 4: served locally)
-Client → [CACHE HIT, no RPC]                  (call 5: served locally)
+```text
+Client → POST /audio/transcribe              → Server   (call 1: compute + cache)
+Client → [CACHE HIT, no RPC]                            (call 2: served locally)
+Client → POST /text/summarize_and_translate  → Server   (call 3: fused operation)
 
-Optimization: result memoization keyed by (image_hash, model).
-              Only 1 server call. Remaining 4 served from in-process cache.
+Optimizations:
+1. Result memoization keyed by audio hash (Call 2 served from in-process cache).
+2. Operator fusion (Call 3 computes both summary and translation in a single RPC).
 ```
-
----
 
 ## Optimizations Applied
 
-- **Result memoization / deduplication**: cache the server response keyed by
-  `sha256(image_bytes):model`. On a cache hit, return the stored result without
-  making an RPC call or sending any data over the network.
-
-This is safe because the caption function is **deterministic and side-effect-free**:
-for the same image and model, the server always returns the same caption.
-
----
+- **Result memoization / deduplication**: Caches the server response keyed by the audio data hash. On a cache hit, it returns the stored transcript without making an RPC call.
+- **Operator Fusion**: Instead of calling summarize and translate sequentially and moving data back and forth, the client calls a fused /text/summarize_and_translate endpoint. The server handles both operations internally, saving a complete network round-trip.
 
 ## Installation
 
 ```bash
 pip install -r requirements.txt
 ```
-
-No GPU or ML framework is required. The server uses a fake caption model that
-returns deterministic captions based on image content hash.
 
 ---
 
@@ -70,27 +53,27 @@ returns deterministic captions based on image content hash.
 ### Step 1: Start the server
 
 ```bash
-python server/caption_server.py
+python server/podcast_server.py
 ```
 
 The server listens on `http://127.0.0.1:8765` by default.
-EXEC_OP records are written to `profiler_logs/caption_exec_ops.jsonl`.
+EXEC_OP records are written to `profiler_logs/podcast_exec_ops.jsonl`.
 
 ### Step 2: Run the basic (unoptimized) version
 
 ```bash
-python client/basic_client.py --image <path/to/image.jpg> --repeats 5
+python client/basic_client.py
 ```
 
-Every call sends the full image to the server. All 5 calls are real RPCs.
+Makes 4 full RPC calls, including a redundant transcription and unfused text processing.
 
 ### Step 3: Run the optimized version
 
 ```bash
-python client/optimized_client.py --image <path/to/image.jpg> --repeats 5
+python client/optimized_client.py
 ```
 
-Only the first call hits the server. Calls 2–5 are served from the local cache.
+Makes only 2 RPC calls. Uses client-side caching and a fused server endpoint.
 
 ### Step 4: Analyze the traces
 
@@ -98,26 +81,24 @@ Only the first call hits the server. Calls 2–5 are served from the local cache
 python analysis/parse_and_compare.py
 ```
 
-Reads `profiler_logs/caption_exec_ops.jsonl` and prints a structured comparison
-of the two traces, including detected memoization opportunities.
+Reads profiler_logs/podcast_exec_ops.jsonl and prints a structured comparison of the two traces, including detected optimization opportunities.
 
 ---
 
 ## Performance Results (Reference Machine)
 
-> Run with `--repeats 5` on a standard development laptop (no GPU).
-> The fake model sleeps for ~215ms to simulate realistic compute time.
+Run on a standard development machine. The server uses time.sleep() to simulate realistic compute times for audio/text models.
 
 | Version   | Latency  | RPC Calls | Data Transferred |
 |-----------|----------|-----------|------------------|
-| Basic     | ~1100ms  | 5         | ~5.2MB           |
-| Optimized | ~220ms   | 1         | ~1.0MB           |
-| Speedup   | ~5.0×    | 5.0×      | 5.0×             |
+| Basic     | ~1016ms  | 4         | ~387B            |
+| Optimized | ~657ms   | 2         | ~271B            |
+| Reduction | ~35.3%   | 50.0%     | 30.0%            |
 
-Hardware: Laptop CPU, no GPU required (fake model)
-Input: any JPEG/PNG image file
+Hardware: CPU only (simulated compute)
+Input: Simulated audio byte payload
 
-*Exact numbers depend on image size and system load.*
+*Exact numbers depend on system load, but the RPC reduction is deterministic.*
 
 ---
 
@@ -158,26 +139,3 @@ Key fields:
 - `inputs_meta` / `outputs_meta` — object IDs and sizes (no raw data)
 - `stage_ms` — server-side breakdown: decode → compute → encode
 - `extra.cache_hit` — `true` for client-side cache hits (latency_ms = 0)
-
-See Appendix A in the course project description for the complete schema.
-
----
-
-## How to Adapt This for Your Own Benchmark
-
-1. **Replace `server/caption_server.py`** with your own tool server.
-   Keep the `build_exec_op_record` / `append_jsonl` calls exactly as shown.
-
-2. **Replace `client/basic_client.py`** with your unoptimized workflow.
-   Pick a `trace_id` at the start of each run and thread it through all calls.
-
-3. **Keep the EXEC_OP logging pattern** exactly as shown — same field names,
-   same object ID format (`obj:<kind>:<sha256_prefix>`).
-
-4. **Add your own `optimized_client.py`** that applies one or more of:
-   - Result memoization (shown here)
-   - Operator fusion (merge two sequential API calls into one)
-   - Dead output elimination (suppress unused server outputs)
-
-5. **Run `analysis/parse_and_compare.py`** — it works on any EXEC_OP log that
-   follows this schema. Add your own analysis logic as needed.
