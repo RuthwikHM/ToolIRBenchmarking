@@ -2,3 +2,9 @@ fastapi
 uvicorn
 requests
 Pillow
+openai-whisper==20250625
+torch
+transformers
+nltk
+sentencepiece
+sacremoses

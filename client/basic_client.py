@@ -1,7 +1,13 @@
-import os, sys, uuid, requests, base64
+import os
+import sys
+import uuid
+import requests
+import base64
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from profiler_utils import now_ms
+
+AUDIO_FILE = "sample.wav"
 
 def main():
     base_url = "http://127.0.0.1:8765"
@@ -9,7 +15,12 @@ def main():
 
     print(f"Starting BASIC workflow. Trace ID: {trace_id}")
 
-    audio_b64 = base64.b64encode(b"fake_audio_bytes_representing_a_large_file").decode("utf-8")
+    if not os.path.exists(AUDIO_FILE):
+        print(f"ERROR: Please place a real audio file named '{AUDIO_FILE}' in this directory.")
+        return
+
+    with open(AUDIO_FILE, "rb") as f:
+        audio_b64 = base64.b64encode(f.read()).decode("utf-8")
 
     t_wall_start = now_ms()
 
@@ -18,7 +29,7 @@ def main():
     res1 = requests.post(f"{base_url}/audio/transcribe", json={"audio": audio_b64, "trace_id": trace_id, "node_id": "transcribe_1"}).json()
     transcript = res1["transcript"]
 
-    # 2. Redundant Transcribe (Inefficiency 1)
+    # 2. Redundant Transcribe
     print("2. Transcribing again (wasting time/bandwidth)...")
     requests.post(f"{base_url}/audio/transcribe", json={"audio": audio_b64, "trace_id": trace_id, "node_id": "transcribe_2"}).json()
 
@@ -27,12 +38,15 @@ def main():
     res3 = requests.post(f"{base_url}/text/summarize", json={"text": transcript, "trace_id": trace_id, "node_id": "summarize_1"}).json()
     summary = res3["summary"]
 
-    # 4. Translate (Inefficiency 2: Unnecessary round trip)
+    # 4. Translate
     print("4. Translating transcript...")
     res4 = requests.post(f"{base_url}/text/translate", json={"text": transcript, "trace_id": trace_id, "node_id": "translate_1"}).json()
+    translation = res4["translation"]
 
     t_wall_end = now_ms()
-    print(f"\n=== Summary ===\nTotal latency: {t_wall_end - t_wall_start}ms\nRPC calls: 4")
+    print(f"\n=== Summary ===")
+    print(f"Total latency: {t_wall_end - t_wall_start}ms")
+    print(f"RPC calls: 4")
 
 if __name__ == "__main__":
     main()
